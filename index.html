@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>聊天室</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💬</text></svg>">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- 落地页 -->
+  <div id="landing" class="screen">
+    <div class="card">
+      <h1>💬 聊天室</h1>
+      <p class="sub">输入房间码即可进入，消息点对点直连，不经过任何应用服务器。</p>
+      <label for="room-input">房间码</label>
+      <input id="room-input" type="text" placeholder="例如：family / team-001" autocomplete="off">
+      <label for="name-input">昵称（可选）</label>
+      <input id="name-input" type="text" placeholder="留空将随机生成" autocomplete="off">
+      <button id="join-btn" class="primary">进入聊天室</button>
+      <p class="hint">相同房间码的人会进入同一个房间实时聊天。内容通过 WebRTC 端到端加密直连，刷新页面会清空记录（无服务器存储）。</p>
+    </div>
+  </div>
+
+  <!-- 聊天页 -->
+  <div id="chat" class="screen" style="display:none;">
+    <header class="topbar">
+      <div>
+        <div id="room-label" class="room-label"></div>
+        <div id="online-label" class="online-label"></div>
+      </div>
+      <button id="leave-btn" class="ghost">退出</button>
+    </header>
+    <div id="status" class="status"></div>
+    <div id="messages" class="messages"></div>
+    <div class="composer">
+      <input id="input" type="text" placeholder="输入消息，回车发送…" autocomplete="off">
+      <button id="send-btn" class="primary">发送</button>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
