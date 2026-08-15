@@ -11,12 +11,20 @@
   const nameInput = document.getElementById('name-input');
   const joinBtn = document.getElementById('join-btn');
   const leaveBtn = document.getElementById('leave-btn');
+  const retryBtn = document.getElementById('retry-btn');
   const messagesEl = document.getElementById('messages');
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('send-btn');
   const roomLabel = document.getElementById('room-label');
   const onlineLabel = document.getElementById('online-label');
   const statusEl = document.getElementById('status');
+
+  // ===== 信令服务器配置（仅用于交换连接信息，不经过聊天内容）=====
+  // 留空 {} 表示使用 PeerJS 公共云（0.peerjs.com）。
+  // 若在国内访问不稳定 / 被墙，请改为自建 PeerJS 信令服务，例如：
+  //   const SIGNAL = { host: '你的服务域名', port: 443, path: '/', secure: true };
+  // 自建服务代码见仓库 peer-server/ 目录（可一键部署到 Render / Railway / Fly.io）。
+  const SIGNAL = {};
 
   let peer = null;     // PeerJS 实例
   let conn = null;     // 客户端 -> 房主 的连接
@@ -25,6 +33,35 @@
   let room = '';
   const clients = new Map(); // 房主视角：DataConnection -> { name }
   let peerListView = [];     // 客户端视角：已知成员昵称列表（含房主与其他人）
+  let connectTimer = null;
+
+  // ---------- Peer 创建 / 连接超时 ----------
+  function makePeer(id) {
+    if (typeof Peer === 'undefined') {
+      status('PeerJS 库未加载，请确认 peerjs.min.js 已随页面一起部署', 'err');
+      return null;
+    }
+    const opts = Object.assign({ debug: 0 }, SIGNAL);
+    return id ? new Peer(id, opts) : new Peer(opts);
+  }
+
+  function clearConnectTimer() {
+    if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
+  }
+
+  function armConnectTimer() {
+    clearConnectTimer();
+    connectTimer = setTimeout(() => {
+      if (role === 'host' || role === 'client') {
+        status('连接超时：信令服务器不可达。请检查网络，或改用自建信令服务后点「重试」。', 'err');
+        showRetry(true);
+      }
+    }, 10000);
+  }
+
+  function showRetry(on) {
+    if (retryBtn) retryBtn.style.display = on ? 'inline-block' : 'none';
+  }
 
   // ---------- 工具 ----------
   function sanitizeRoom(code) {
@@ -106,6 +143,8 @@
   }
 
   function resetPeer() {
+    clearConnectTimer();
+    showRetry(false);
     if (peer) { try { peer.destroy(); } catch (e) {} }
     peer = null;
     conn = null;
@@ -116,8 +155,12 @@
     role = 'host';
     clients.clear();
     resetPeer();
-    peer = new Peer(hostId(), { debug: 0 });
+    peer = makePeer(hostId());
+    if (!peer) return;
+    armConnectTimer();
     peer.on('open', () => {
+      clearConnectTimer();
+      showRetry(false);
       status('你已成为房主，等待其他人加入…', 'ok');
       updateOnline();
     });
@@ -136,11 +179,13 @@
       connection.on('error', () => {});
     });
     peer.on('error', (err) => {
+      clearConnectTimer();
       if (err.type === 'unavailable-id') {
         // 房间已有房主，改为客户端接入
         becomeClient();
       } else {
         status('连接出错：' + err.type, 'err');
+        showRetry(true);
       }
     });
   }
@@ -166,18 +211,24 @@
   function becomeClient() {
     role = 'client';
     resetPeer();
-    peer = new Peer({ debug: 0 });
+    peer = makePeer();
+    if (!peer) return;
+    armConnectTimer();
     peer.on('open', () => {
+      clearConnectTimer();
+      showRetry(false);
       status('正在连接房间…');
       conn = peer.connect(hostId(), { reliable: true });
       setupClientConn(conn);
     });
     peer.on('error', (err) => {
+      clearConnectTimer();
       if (err.type === 'peer-unavailable') {
         // 房主暂时不存在，尝试自己成为房主（重选）
         becomeHost();
       } else {
         status('连接出错：' + err.type, 'err');
+        showRetry(true);
       }
     });
   }
@@ -216,13 +267,23 @@
     becomeHost();
   }
 
-  // ---------- 进入 / 退出 ----------
+  // ---------- 进入 / 退出 / 重试 ----------
   function join() {
     const code = roomInput.value.trim();
     const nm = nameInput.value.trim();
     if (!code) { roomInput.focus(); return; }
     room = sanitizeRoom(code);
     myName = nm || ('用户' + Math.floor(Math.random() * 9000 + 1000));
+    enterRoom(code);
+  }
+
+  function retry() {
+    if (!room) { join(); return; }
+    const code = room.replace(ROOM_PREFIX, '');
+    enterRoom(code);
+  }
+
+  function enterRoom(code) {
     landing.style.display = 'none';
     chat.style.display = 'flex';
     roomLabel.textContent = '房间：' + code;
@@ -249,4 +310,5 @@
   sendBtn.addEventListener('click', sendMessage);
   inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMessage(); });
   leaveBtn.addEventListener('click', leave);
+  retryBtn.addEventListener('click', retry);
 })();
