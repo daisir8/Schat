@@ -1,0 +1,14 @@
+# Render 部署配置（在 Render 新建 "Blueprint" 服务并关联本仓库即可）
+services:
+  - type: web
+    name: chatroom-peer-server
+    runtime: node
+    plan: free
+    rootDir: peer-server
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: PEER_PATH
+        value: /

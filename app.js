@@ -19,12 +19,47 @@
   const onlineLabel = document.getElementById('online-label');
   const statusEl = document.getElementById('status');
 
+  // ===== ICE 服务器（STUN 打洞 + TURN 中继，用于跨网络 / 蜂窝 / 对称 NAT）=====
+  // 默认使用 OpenRelay 免费公共 TURN（静态凭据，无需注册即可用，20GB/月免费额度）。
+  // 聊天内容经 TURN 时是端到端加密（DTLS）的，TURN 服务器只能转发密文、看不懂内容。
+  // 若你的网络访问 openrelay.metered.ca 也被限（国内有时较慢），可改成自建 coturn，
+  // 把下面 turn 条目换成你自己的 { urls, username, credential } 即可。
+  const ICE_SERVERS = [
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+  ];
+
   // ===== 信令服务器配置（仅用于交换连接信息，不经过聊天内容）=====
   // 留空 {} 表示使用 PeerJS 公共云（0.peerjs.com）。
-  // 若在国内访问不稳定 / 被墙，请改为自建 PeerJS 信令服务，例如：
+  // 若在国内访问不稳定 / 被墙（表现为 "network" 或 "信令服务器不可达"），请改用自建 PeerJS 信令服务，例如：
   //   const SIGNAL = { host: '你的服务域名', port: 443, path: '/', secure: true };
-  // 自建服务代码见仓库 peer-server/ 目录（可一键部署到 Render / Railway / Fly.io）。
+  // 也可在网址后追加 ?signal=https://你的域名/peerjs 直接分享自带信令的链接。
+  // 自建服务代码见仓库 peer-server/ 目录（可一键部署到 Fly.io 香港区 / Render / Railway）。
   const SIGNAL = {};
+
+  // 从分享链接读取 ?signal= / ?room= / ?name=
+  (function applyQuery() {
+    try {
+      const qs = new URLSearchParams(location.search);
+      const sig = qs.get('signal');
+      if (sig) {
+        const u = new URL(sig);
+        SIGNAL.host = u.hostname;
+        SIGNAL.port = u.port ? parseInt(u.port, 10) : (u.protocol === 'http:' ? 80 : 443);
+        SIGNAL.path = (u.pathname && u.pathname !== '/') ? u.pathname : '/';
+        SIGNAL.secure = (u.protocol === 'https:' || u.protocol === 'wss:');
+        SIGNAL.key = qs.get('key') || 'peerjs';
+      }
+      const r = qs.get('room');
+      if (r) roomInput.value = r;
+      const n = qs.get('name');
+      if (n) nameInput.value = n;
+    } catch (e) { /* 忽略解析错误，走默认公共云 */ }
+  })();
 
   let peer = null;     // PeerJS 实例
   let conn = null;     // 客户端 -> 房主 的连接
@@ -33,7 +68,8 @@
   let room = '';
   const clients = new Map(); // 房主视角：DataConnection -> { name }
   let peerListView = [];     // 客户端视角：已知成员昵称列表（含房主与其他人）
-  let connectTimer = null;
+  let signalingTimer = null; // 等待信令服务器（peer.open）的超时
+  let dataConnTimer = null;  // 等待数据通道（conn.open）的超时
 
   // ---------- Peer 创建 / 连接超时 ----------
   function makePeer(id) {
@@ -41,22 +77,34 @@
       status('PeerJS 库未加载，请确认 peerjs.min.js 已随页面一起部署', 'err');
       return null;
     }
-    const opts = Object.assign({ debug: 0 }, SIGNAL);
+    const opts = Object.assign({ debug: 0, config: { iceServers: ICE_SERVERS } }, SIGNAL);
     return id ? new Peer(id, opts) : new Peer(opts);
   }
 
-  function clearConnectTimer() {
-    if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; }
+  function clearSignalingTimer() {
+    if (signalingTimer) { clearTimeout(signalingTimer); signalingTimer = null; }
+  }
+  function clearDataConnTimer() {
+    if (dataConnTimer) { clearTimeout(dataConnTimer); dataConnTimer = null; }
   }
 
-  function armConnectTimer() {
-    clearConnectTimer();
-    connectTimer = setTimeout(() => {
-      if (role === 'host' || role === 'client') {
-        status('连接超时：信令服务器不可达。请检查网络，或改用自建信令服务后点「重试」。', 'err');
-        showRetry(true);
-      }
+  function armSignalingTimer() {
+    clearSignalingTimer();
+    signalingTimer = setTimeout(() => {
+      status('连接超时：信令服务器不可达。常见原因是国内网络访问公共云（0.peerjs.com）被限制。' +
+             '请部署仓库内 peer-server 到可访问的主机并分享带 ?signal= 的链接，或点「重试」。', 'err');
+      showRetry(true);
     }, 10000);
+  }
+
+  function armDataConnTimer() {
+    clearDataConnTimer();
+    dataConnTimer = setTimeout(() => {
+      status('连接超时：无法与房主建立数据通道。常见原因是手机处于蜂窝 / 对称 NAT 网络，' +
+             '直连打洞失败。已配置 TURN 中继，若仍失败可能是该 TURN 也被网络限制，请点「重试」，' +
+             '或让手机与电脑连同一 WiFi 后再试。', 'err');
+      showRetry(true);
+    }, 20000);
   }
 
   function showRetry(on) {
@@ -143,7 +191,8 @@
   }
 
   function resetPeer() {
-    clearConnectTimer();
+    clearSignalingTimer();
+    clearDataConnTimer();
     showRetry(false);
     if (peer) { try { peer.destroy(); } catch (e) {} }
     peer = null;
@@ -157,9 +206,9 @@
     resetPeer();
     peer = makePeer(hostId());
     if (!peer) return;
-    armConnectTimer();
+    armSignalingTimer();
     peer.on('open', () => {
-      clearConnectTimer();
+      clearSignalingTimer();
       showRetry(false);
       status('你已成为房主，等待其他人加入…', 'ok');
       updateOnline();
@@ -179,10 +228,13 @@
       connection.on('error', () => {});
     });
     peer.on('error', (err) => {
-      clearConnectTimer();
+      clearSignalingTimer();
       if (err.type === 'unavailable-id') {
         // 房间已有房主，改为客户端接入
         becomeClient();
+      } else if (err.type === 'network') {
+        status('无法连接信令服务器（network）。国内网络访问公共云常被限，请改用自建信令（?signal=）后点「重试」。', 'err');
+        showRetry(true);
       } else {
         status('连接出错：' + err.type, 'err');
         showRetry(true);
@@ -195,7 +247,7 @@
     if (data.type === 'join') {
       const info = clients.get(conn);
       if (info) info.name = data.name || '匿名';
-      relayToOthers(conn, { type: 'join', name: data.name, ts: data.ts });
+      relayToOthers(conn, { type: 'join', name: data.name, ts: Date.now() });
       renderSystem((data.name || '匿名') + ' 加入了房间');
       // 把当前成员名单发给新加入者
       const names = [myName].concat([...clients.values()].map(i => i.name));
@@ -213,19 +265,23 @@
     resetPeer();
     peer = makePeer();
     if (!peer) return;
-    armConnectTimer();
+    armSignalingTimer();
     peer.on('open', () => {
-      clearConnectTimer();
+      clearSignalingTimer();
       showRetry(false);
       status('正在连接房间…');
+      armDataConnTimer(); // 关键：数据通道也必须有超时，否则会一直"正在连接房间"
       conn = peer.connect(hostId(), { reliable: true });
       setupClientConn(conn);
     });
     peer.on('error', (err) => {
-      clearConnectTimer();
+      clearSignalingTimer();
       if (err.type === 'peer-unavailable') {
         // 房主暂时不存在，尝试自己成为房主（重选）
         becomeHost();
+      } else if (err.type === 'network') {
+        status('无法连接信令服务器（network）。国内网络访问公共云常被限，请改用自建信令（?signal=）后点「重试」。', 'err');
+        showRetry(true);
       } else {
         status('连接出错：' + err.type, 'err');
         showRetry(true);
@@ -235,16 +291,23 @@
 
   function setupClientConn(connection) {
     connection.on('open', () => {
+      clearDataConnTimer();
       connection.send({ type: 'join', name: myName, ts: Date.now() });
       status('已连接，可以开始聊天', 'ok');
       updateOnline();
     });
     connection.on('data', (data) => onClientData(data));
     connection.on('close', () => {
+      clearDataConnTimer();
       status('与房主断开，正在尝试重新进入…');
-      retryJoin();
+      retryReconnect();
     });
-    connection.on('error', () => {});
+    connection.on('error', (err) => {
+      clearDataConnTimer();
+      const t = err && err.type ? err.type : '未知';
+      status('连接出错（' + t + '）。若为网络 / NAT 问题请点「重试」，或让手机与电脑连同一 WiFi。', 'err');
+      showRetry(true);
+    });
   }
 
   function onClientData(data) {
@@ -261,10 +324,10 @@
     }
   }
 
-  // 客户端失连后自动重选房主/重连
-  function retryJoin() {
+  // 客户端失连后自动重连到同一房主（不擅自抢占房主身份）
+  function retryReconnect() {
     role = null;
-    becomeHost();
+    becomeClient();
   }
 
   // ---------- 进入 / 退出 / 重试 ----------
